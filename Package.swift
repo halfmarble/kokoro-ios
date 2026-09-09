@@ -21,7 +21,7 @@
 //      product embedded MLX/MLXNN as frameworks while MLXLLM linked the same
 //      modules statically — TWO MLX runtimes in one process, objc duplicate
 //      class warnings at launch and crashes that were hard to attribute.
-//      Upstream PRs #19 and #13 address this.
+//      Upstream issue #26 reports this.
 //   4. The MisakiSwift dependency points at halfmarble/MisakiSwift, which
 //      carries the matching resource rename plus a G2P number fix. See below.
 //
