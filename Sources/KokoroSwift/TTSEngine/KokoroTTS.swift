@@ -148,6 +148,28 @@ public final class KokoroTTS {
     // Initialize G2P processor for text-to-phoneme conversion
     g2pProcessor = try? G2PFactory.createG2PProcessor(engine: g2p)
   }
+
+  /// Builds the G2P processor's language engine — and with it its lexicon —
+  /// without synthesising anything.
+  ///
+  /// `setLanguage` is reached only from `generateAudio`, so the engine is
+  /// constructed inside whichever synthesis runs first. With MisakiSwift that
+  /// engine loads the gold and silver dictionaries and grows both, and the
+  /// call carrying it pays a one-time cost the others do not: measured on an
+  /// iPhone, phonemization takes ~130 ms on the first call against ~1 ms once
+  /// the lexicon exists.
+  ///
+  /// A caller that wants to pay that cost up front currently cannot, because
+  /// the only door into `setLanguage` is a synthesis. Where an application
+  /// warms up in the background, the cost lands on whichever call wins the
+  /// race — and on a run where the warm-up is skipped, that is a user-facing
+  /// one. Calling this after `init` puts it in one predictable place.
+  ///
+  /// It does not make the cost smaller, and it builds only the language given:
+  /// a later `generateAudio` in a different language still rebuilds.
+  public func preloadG2P(language: Language = .enUS) throws {
+    try updateLanguageIfNeeded(language)
+  }
   
   /// Generates audio from text using the specified voice and parameters.
   ///
