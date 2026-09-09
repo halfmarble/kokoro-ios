@@ -187,7 +187,18 @@ public final class KokoroTTS {
   /// - Returns: Array of audio samples as Float values
   /// - Throws: `KokoroTTSError.tooManyTokens` if text is too long,
   ///           or `G2PProcessorError` if G2P processing fails
-  public func generateAudio(voice: MLXArray, language: Language, text: String, speed: Float = 1.0) throws -> ([Float], [MToken]?) {
+  ///   - predictTimestamps: whether to fill in per-token timestamps on the
+  ///     returned tokens. Defaults to `true` so existing callers are unaffected.
+  ///     Pass `false` when only the audio is wanted: the predictor reads
+  ///     durations back to the host, and it cannot affect `samples` — it only
+  ///     mutates the token array the caller is about to discard.
+  public func generateAudio(
+    voice: MLXArray,
+    language: Language,
+    text: String,
+    speed: Float = 1.0,
+    predictTimestamps: Bool = true
+  ) throws -> ([Float], [MToken]?) {
     // Update language if it has changed
     try updateLanguageIfNeeded(language)
 
@@ -271,7 +282,7 @@ public final class KokoroTTS {
     BenchmarkTimer.stopTimer(Constants.bm_decoder)
 
     // Try to predict timestamp of each token if G2P processor returns tokens
-    if let tokenArray {
+    if predictTimestamps, let tokenArray {
       TimestampPredictor.preditTimestamps(tokens: tokenArray, predictionDuration: predictedDurations)
     }
     
@@ -333,19 +344,23 @@ public final class KokoroTTS {
     let paddedInputIdsArray = [0] + inputIds + [0]
     let paddedInputIds = MLXArray(paddedInputIdsArray).expandedDimensions(axes: [0])
 
-    // Create input length tensor
-    let inputLengths = MLXArray(paddedInputIds.dim(-1))
-    let inputLengthMax: Int = inputLengths.max().item()
-    
-    // Create text mask for padding positions
-    var textMask = MLXArray(0 ..< inputLengthMax)
-    textMask = textMask + 1 .> inputLengths
-    textMask = textMask.expandedDimensions(axes: [0])
-    
-    // Create attention mask (1 for valid positions, 0 for padding)
-    let swiftTextMask: [Bool] = textMask.asArray(Bool.self)
-    let swiftTextMaskInt = swiftTextMask.map { !$0 ? 1 : 0 }
-    let attentionMask = MLXArray(swiftTextMaskInt).reshaped(textMask.shape)
+    // BUILD BOTH MASKS DIRECTLY. The previous version computed them on the GPU
+    // and read them back: `inputLengths.max().item()` was one host
+    // synchronisation, and `textMask.asArray(Bool.self)` another — to derive
+    // values that are fully determined before any GPU work starts.
+    //
+    // Each invocation carries ONE sequence, already padded to its own length, so
+    // there are no padding positions: `index + 1 > inputLength` is false for
+    // every index in 0..<inputLength, and the attention mask is its inverse.
+    // `maskValues` computes exactly that and is asserted against the old
+    // GPU-side formula in the tests, so this is a provable substitution rather
+    // than a claim.
+    let inputLength = paddedInputIdsArray.count
+    let inputLengths = MLXArray(inputLength)
+
+    let masks = Self.maskValues(inputLength: inputLength)
+    let textMask = MLXArray(masks.text).reshaped([1, inputLength])
+    let attentionMask = MLXArray(masks.attention).reshaped([1, inputLength])
 
     return (paddedInputIds, attentionMask, inputLengths, textMask, inputIds)
   }
@@ -439,12 +454,35 @@ public final class KokoroTTS {
   /// [1,512,64]x[64,576], asserted in GatherEquivalenceTests. This change is
   /// taken for the cost above, and it removes the exposure either way.
   private func createAlignmentIndices(durations: MLXArray) -> MLXArray {
-    MLX.concatenated(
-      durations.enumerated().map { index, duration in
-        let frameCount: Int = duration.item()
-        return MLX.repeated(MLXArray([Int32(index)]), count: frameCount)
-      }
-    )
+    // ONE host read for the whole duration vector, then expand in Swift.
+    //
+    // This loop used to call `.item()` once PER PHONEME — a GPU->CPU
+    // synchronisation each time — and then hand `MLX.concatenated` that many
+    // single-element arrays to stitch back together. The durations are needed on
+    // the host either way; reading them in one go costs one synchronisation
+    // instead of N, and the expansion is a Swift array append.
+    let swiftDurations = durations.asArray(Int32.self)
+    return MLXArray(Self.expandDurations(swiftDurations))
+  }
+
+  /// Per-frame phoneme indices from a duration vector: phoneme `i` repeated
+  /// `durations[i]` times. Pure Swift and `static` so the tests can check it
+  /// exactly, with no GPU and no model.
+  static func expandDurations(_ durations: [Int32]) -> [Int32] {
+    var indices: [Int32] = []
+    indices.reserveCapacity(durations.reduce(0) { $0 + Int(max(0, $1)) })
+    for (phoneme, duration) in durations.enumerated() where duration > 0 {
+      indices.append(contentsOf: repeatElement(Int32(phoneme), count: Int(duration)))
+    }
+    return indices
+  }
+
+  /// The two masks for a single, fully-valid sequence of `inputLength`
+  /// positions. Extracted and `static` so the tests can assert it against the
+  /// GPU-side formula it replaced.
+  static func maskValues(inputLength: Int) -> (text: [Bool], attention: [Int]) {
+    (text: [Bool](repeating: false, count: inputLength),
+     attention: [Int](repeating: 1, count: inputLength))
   }
   
   /// FORCE EVALUATION AT EACH STAGE BOUNDARY, so a stage timer measures the
