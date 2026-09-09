@@ -94,9 +94,34 @@ func interpolate1d(
     return MLX.broadcast(input, to: outputShape)
   }
 
-  let xLow = MLX.floor(x).asType(.int32)
+  // CLAMP THE SOURCE INDEX AT ZERO BEFORE FLOORING IT. `xHigh` was always
+  // clamped at the top; `xLow` was clamped at neither end, and that is a bug
+  // rather than an asymmetry.
+  //
+  // Under align_corners=false the source index is x = (i + 0.5)*scale - 0.5, so
+  // whenever scale < 1 the LEADING output samples have x < 0. `floor` gives -1,
+  // and a negative fancy-index into an MLXArray does NOT clamp — it wraps to the
+  // LAST element, NumPy style. SineGen upsamples phase by 300, so x stays
+  // negative for the first ~150 samples and every one of them borrowed the end
+  // of the input, right where the phase CUMSUM begins; a cumsum then carries
+  // that error through everything after it.
+  //
+  // Measured on [0, 1, 2, 3, 1000] upsampled x300: the first output sample came
+  // back as 498.33 — 0.498 * 1000 — where it should be under 1.
+  //
+  // Found by @antacosta, on their fork of this package.
+  //
+  // NOTE, deliberate difference from that fork: it keeps the unclamped value for
+  // the fraction (xFrac = x - xLowRaw), which RAMPS from input[0] toward
+  // input[1] across the leading region. PyTorch clamps the source index itself —
+  // `area_pixel_compute_source_index` returns 0 when src_idx < 0 for non-cubic
+  // modes — which HOLDS input[0] instead. Kokoro's weights were trained and
+  // validated against that reference, so this matches PyTorch. Both remove the
+  // wraparound; only this one reproduces the reference.
+  let xClamped = MLX.maximum(x, MLXArray(Float(0)))
+  let xLow = MLX.floor(xClamped).asType(.int32)
   let xHigh = MLX.minimum(xLow + 1, MLXArray(inputWidth - 1, dtype: .int32))
-  let xFrac = x - xLow.asType(.float32)
+  let xFrac = xClamped - xLow.asType(.float32)
 
   let yLow = input[0..., 0..., xLow]
   let yHigh = input[0..., 0..., xHigh]
