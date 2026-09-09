@@ -1,3 +1,9 @@
+// MODIFIED BY HALFMARBLE LLC, 2026-08-06. The MIT License requires this
+// notice and the copyright above to travel with the file, including modified
+// copies. Upstream: github.com/mlalma/kokoro-ios (tag 1.0.11). Change here: the
+// bundled resource directory was renamed `Resources/` -> `KokoroData/`, because
+// iOS codesign rejects a resource bundle whose top-level folder is literally
+// named "Resources". See Vendor/VENDOR.md patches 1-3.
 //
 //  Kokoro-tts-lib
 //
@@ -154,7 +160,7 @@ struct KokoroConfig: Decodable {
   ///         and should fail fast if the file is missing or malformed
   nonisolated static func loadConfig() -> KokoroConfig {
     // Locate config.json in the module bundle
-    let fileURL = Bundle.module.url(forResource: "config", withExtension: "json", subdirectory: "Resources")!
+    let fileURL = Bundle.module.url(forResource: "config", withExtension: "json", subdirectory: "KokoroData")!
     
     // Read file contents
     let configJSON = try! String(contentsOf: fileURL, encoding: .utf8)
