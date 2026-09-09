@@ -4,6 +4,7 @@
 import Foundation
 import MLX
 import MLXNN
+import MLXUtilsLibrary
 
 class AlbertSelfAttention {
   let numAttentionHeads: Int
@@ -14,7 +15,7 @@ class AlbertSelfAttention {
   let key: Linear
   let value: Linear
   let dense: Linear
-  let layerNorm: LayerNorm
+  let layerNorm: LayerNormInference
 
   init(weights: [String: MLXArray], config: AlbertModelArgs, layerNum: Int, innerGroupNum: Int) {
     numAttentionHeads = config.numAttentionHeads
@@ -30,8 +31,6 @@ class AlbertSelfAttention {
     dense = Linear(weight: weights["bert.encoder.albert_layer_groups.\(layerNum).albert_layers.\(innerGroupNum).attention.dense.weight"]!,
                    bias: weights["bert.encoder.albert_layer_groups.\(layerNum).albert_layers.\(innerGroupNum).attention.dense.bias"]!)
 
-    layerNorm = LayerNorm(dimensions: config.hiddenSize, eps: config.layerNormEps)
-
     let layerNormWeights = weights["bert.encoder.albert_layer_groups.\(layerNum).albert_layers.\(innerGroupNum).attention.LayerNorm.weight"]!
     let layerNormBiases = weights["bert.encoder.albert_layer_groups.\(layerNum).albert_layers.\(innerGroupNum).attention.LayerNorm.bias"]!
 
@@ -39,10 +38,15 @@ class AlbertSelfAttention {
       fatalError("Wrong shape for AlbertSelfAttention LayerNorm bias or weights!")
     }
 
-    for i in 0 ..< layerNormBiases.shape[0] {
-      layerNorm.bias![i] = layerNormBiases[i]
-      layerNorm.weight![i] = layerNormWeights[i]
-    }
+    // WHOLE-ARRAY, NOT ELEMENT BY ELEMENT. This used to build an MLXNN
+    // LayerNorm from fresh ones/zeros and then overwrite it one scalar at a
+    // time — `count * 2` subscript assignments, each its own graph op, paid at
+    // load. `LayerNormInference` already exists here to take the arrays
+    // directly, and wraps the same MLXFast.layerNorm that MLXNN's LayerNorm
+    // calls, so the maths is identical. Measured on an iPhone across three
+    // launches per arm: KokoroTTS construction 345 ms -> 291 ms.
+    layerNorm = LayerNormInference(weight: layerNormWeights, bias: layerNormBiases,
+                                   eps: config.layerNormEps)
   }
 
   func transposeForScores(_ x: MLXArray) -> MLXArray {
@@ -64,6 +68,15 @@ class AlbertSelfAttention {
     _ hiddenStates: MLXArray,
     attentionMask: MLXArray? = nil
   ) -> MLXArray {
+    // THREE-WAY SPLIT, accumulated across all numHiddenLayers invocations
+    // because BenchmarkTimer's delta is `+=`. The eval() calls are load-
+    // bearing: without them these timers measure GRAPH CONSTRUCTION rather
+    // than work, MLX being lazy. Everything here is behind profileStages,
+    // which is off by default.
+    let profiling = KokoroTTS.profileStages
+
+    if profiling { BenchmarkTimer.startTimer(KokoroTTS.Constants.bm_attnProj,
+                                             KokoroTTS.Constants.bm_bert) }
     let mixedQueryLayer = query(hiddenStates)
     let mixedKeyLayer = key(hiddenStates)
     let mixedValueLayer = value(hiddenStates)
@@ -71,6 +84,12 @@ class AlbertSelfAttention {
     let queryLayer = transposeForScores(mixedQueryLayer)
     let keyLayer = transposeForScores(mixedKeyLayer)
     let valueLayer = transposeForScores(mixedValueLayer)
+    if profiling {
+      MLX.eval(queryLayer, keyLayer, valueLayer)
+      BenchmarkTimer.stopTimer(KokoroTTS.Constants.bm_attnProj)
+      BenchmarkTimer.startTimer(KokoroTTS.Constants.bm_attnCore,
+                                KokoroTTS.Constants.bm_bert)
+    }
 
     let keyLayerTransposed = keyLayer.transposed(0, 1, 3, 2)
     var attentionScores = MLX.matmul(queryLayer, keyLayerTransposed)
@@ -83,6 +102,12 @@ class AlbertSelfAttention {
     let attentionProbs = MLX.softmax(attentionScores, axis: -1)
 
     var contextLayer = MLX.matmul(attentionProbs, valueLayer)
+    if profiling {
+      MLX.eval(contextLayer)
+      BenchmarkTimer.stopTimer(KokoroTTS.Constants.bm_attnCore)
+      BenchmarkTimer.startTimer(KokoroTTS.Constants.bm_attnOut,
+                                KokoroTTS.Constants.bm_bert)
+    }
     contextLayer = contextLayer.transposed(0, 2, 1, 3)
 
     var newContextLayerShape: [Int] = []
@@ -97,6 +122,10 @@ class AlbertSelfAttention {
     contextLayer = contextLayer.reshaped(newContextLayerShape)
     contextLayer = dense(contextLayer)
     contextLayer = layerNorm(contextLayer + hiddenStates)
+    if profiling {
+      MLX.eval(contextLayer)
+      BenchmarkTimer.stopTimer(KokoroTTS.Constants.bm_attnOut)
+    }
 
     return contextLayer
   }

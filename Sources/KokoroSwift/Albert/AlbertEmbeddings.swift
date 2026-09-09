@@ -9,13 +9,12 @@ class AlbertEmbeddings {
   let wordEmbeddings: Embedding
   let positionEmbeddings: Embedding
   let tokenTypeEmbeddings: Embedding
-  let layerNorm: LayerNorm
+  let layerNorm: LayerNormInference
 
   init(weights: [String: MLXArray], config: AlbertModelArgs) {
     wordEmbeddings = Embedding(weight: weights["bert.embeddings.word_embeddings.weight"]!)
     positionEmbeddings = Embedding(weight: weights["bert.embeddings.position_embeddings.weight"]!)
     tokenTypeEmbeddings = Embedding(weight: weights["bert.embeddings.token_type_embeddings.weight"]!)
-    layerNorm = LayerNorm(dimensions: config.embeddingSize, eps: config.layerNormEps)
     let layerNormWeights = weights["bert.embeddings.LayerNorm.weight"]!
     let layerNormBiases = weights["bert.embeddings.LayerNorm.bias"]!
 
@@ -23,10 +22,15 @@ class AlbertEmbeddings {
       fatalError("Wrong shape for AlbertEmbeddings LayerNorm bias or weights!")
     }
 
-    for i in 0 ..< layerNormBiases.shape[0] {
-      layerNorm.bias![i] = layerNormBiases[i]
-      layerNorm.weight![i] = layerNormWeights[i]
-    }
+    // WHOLE-ARRAY, NOT ELEMENT BY ELEMENT. This used to build an MLXNN
+    // LayerNorm from fresh ones/zeros and then overwrite it one scalar at a
+    // time — `count * 2` subscript assignments, each its own graph op, paid at
+    // load. `LayerNormInference` already exists here to take the arrays
+    // directly, and wraps the same MLXFast.layerNorm that MLXNN's LayerNorm
+    // calls, so the maths is identical. Measured on an iPhone across three
+    // launches per arm: KokoroTTS construction 345 ms -> 291 ms.
+    layerNorm = LayerNormInference(weight: layerNormWeights, bias: layerNormBiases,
+                                   eps: config.layerNormEps)
   }
 
   func callAsFunction(

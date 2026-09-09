@@ -489,5 +489,15 @@ public final class KokoroTTS {
     static let bm_align = "Align"
     static let bm_textenc = "TextEncode"
     static let bm_materialise = "Materialise"
+
+    // ALBERT attention, split three ways. Only bm_attnCore is the part a fused
+    // scaled-dot-product-attention kernel would replace; the projections
+    // before it and the dense/LayerNorm after it stay regardless. Measured on
+    // an iPhone with these timers: at 85 characters attnCore is 3.3% of the
+    // BERT stage and 0.45% of a synthesis, which is why this library still
+    // computes attention by hand.
+    static let bm_attnProj = "AttnProj"
+    static let bm_attnCore = "AttnCore"
+    static let bm_attnOut  = "AttnOut"
   }
 }
