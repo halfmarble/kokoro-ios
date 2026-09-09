@@ -6,6 +6,12 @@ import MLX
 import MLXNN
 
 class Generator {
+
+  /// Bound applied to convPost's log-magnitude before `exp()`. Exposed so the
+  /// tests can assert it stays inside float16's range, rather than a test
+  /// merely restating whatever the code happens to say.
+  static let logMagnitudeClamp: Float = 10.0
+
   let numKernels: Int
   let numUpsamples: Int
   let mSource: SourceModuleHnNSF
@@ -190,7 +196,26 @@ class Generator {
     newX = convPost(newX, conv: MLX.conv1d)
     newX = MLX.swappedAxes(newX, 2, 1)
     
-    let spec = MLX.exp(newX[0..., 0 ..< (postNFFt / 2 + 1), 0...])
+    // CLAMP THE LOG-MAGNITUDE BEFORE EXPONENTIATING IT.
+    //
+    // Upstream-confirmed: Blaizzy/mlx-audio #815, fixed in PR #814. convPost's
+    // raw output can reach magnitudes around 1e11 for some inputs. exp() of
+    // that overflows to inf, which then propagates as NaN through the iSTFT
+    // reconstruction. Short of literal overflow, an unclamped and occasionally
+    // very large log-magnitude drives the reconstructed waveform far outside
+    // any normal audio range — harsh, distorted output rather than silence,
+    // which is the harder symptom to attribute.
+    //
+    // THE BOUND MATTERS MORE HERE THAN UPSTREAM, BECAUSE THESE WEIGHTS ARE F16.
+    // float32 overflows at ~3.4e38, so exp() survives a log-magnitude near 88.
+    // float16 overflows at 65504 — exp() reaches that at about 11.1. An F16
+    // build has roughly an eighth of the headroom, and 10 keeps exp() at 22026,
+    // inside float16 with room to spare. Asserted in the tests against
+    // Float16.greatestFiniteMagnitude rather than restated as a literal.
+    let logMagnitude = MLX.clip(newX[0..., 0 ..< (postNFFt / 2 + 1), 0...],
+                                min: -Generator.logMagnitudeClamp,
+                                max: Generator.logMagnitudeClamp)
+    let spec = MLX.exp(logMagnitude)
     let phase = MLX.sin(newX[0..., (postNFFt / 2 + 1)..., 0...])
 
     let result = stft.inverse(magnitude: spec, phase: phase)

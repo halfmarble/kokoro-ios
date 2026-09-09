@@ -68,10 +68,24 @@ class SineGen {
     let fn = f0 * range.reshaped([1, 1, range.shape[0]])
 
     // Generate sine waveforms
-    let sineWaves = _f02sine(fn) * sineAmp
+    var sineWaves = _f02sine(fn) * sineAmp
 
     // Generate UV signal
-    let uv = _f02uv(f0)
+    var uv = _f02uv(f0)
+
+    // TRIM BOTH TO THE MINIMUM COMMON LENGTH BEFORE COMBINING THEM.
+    //
+    // Upstream-confirmed: Blaizzy/mlx-audio #803, fixed in PR #814. `_f02sine`'s
+    // downsample -> cumsum -> upsample round trip is not strictly
+    // length-preserving: it can emit `sineWaves` one upsampleScale hop (300
+    // samples) longer or shorter than `uv`, which is computed directly from f0
+    // at its original length. Combining mismatched lengths either refuses to
+    // broadcast or silently misaligns the harmonic and noise signals in time —
+    // and a misalignment sounds like a defective voice rather than a crash,
+    // so it is the expensive failure of the two.
+    let minLength = min(sineWaves.shape[1], uv.shape[1])
+    if sineWaves.shape[1] != minLength { sineWaves = sineWaves[0..., 0 ..< minLength, 0...] }
+    if uv.shape[1] != minLength { uv = uv[0..., 0 ..< minLength, 0...] }
 
     // Generate noise
     let noiseAmp = uv * noiseStd + (1 - uv) * sineAmp / 3
