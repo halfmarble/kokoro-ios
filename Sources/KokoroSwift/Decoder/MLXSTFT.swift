@@ -17,32 +17,6 @@ func hanning(length: Int) -> MLXArray {
   return 0.5 + 0.5 * cos(n * factor)
 }
 
-// Unwrap implementation to replace np.unwrap
-func unwrap(p: MLXArray) -> MLXArray {
-  let period: Float = 2.0 * .pi
-  let discont: Float = period / 2.0
-
-  let pDiff1 = p[0..., 0 ..< p.shape[1] - 1]
-  let pDiff2 = p[0..., 1 ..< p.shape[1]]
-
-  let pDiff = pDiff2 - pDiff1
-
-  let intervalHigh: Float = period / 2.0
-  let intervalLow: Float = -intervalHigh
-
-  var pDiffMod = pDiff - intervalLow
-  pDiffMod = (((pDiffMod % period) + period) % period) + intervalLow
-
-  let ddSignArray = MLX.where(pDiff .> 0, intervalHigh, pDiffMod)
-
-  pDiffMod = MLX.where(pDiffMod .== intervalLow, ddSignArray, pDiffMod)
-
-  var phCorrect = pDiffMod - pDiff
-  phCorrect = MLX.where(abs(pDiff) .< discont, MLXArray(0.0), phCorrect)
-
-  return MLX.concatenated([p[0..., 0 ..< 1], p[0..., 1...] + phCorrect.cumsum(axis: 1)], axis: 1)
-}
-
 func mlxStft(
   x: MLXArray,
   nFft: Int = 800,
@@ -183,11 +157,21 @@ class MLXSTFT {
   var magnitude: MLXArray?
   var phase: MLXArray?
 
+  /// The Hann window depends only on `winLength`, so it is built once here
+  /// rather than rebuilt inside every `mlxIstft` call. `inverse` runs once per
+  /// batch item per synthesis and each call recomputed an 800-point cosine it
+  /// already had.
+  private let cachedWindow: MLXArray
+
   init(filterLength: Int = 800, hopLength: Int = 200, winLength: Int = 800, window: String = "hann") {
     self.filterLength = filterLength
     self.hopLength = hopLength
     self.winLength = winLength
     self.window = window
+    guard window.lowercased() == "hann" else {
+      fatalError("Only hanning is supported for window, not \(window)")
+    }
+    self.cachedWindow = hanning(length: winLength + 1)[0 ..< winLength]
   }
 
   func transform(inputData: MLXArray) -> (MLXArray, MLXArray) {
@@ -230,7 +214,22 @@ class MLXSTFT {
     var reconstructed: [MLXArray] = []
 
     for batchIdx in 0 ..< magnitude.shape[0] {
-      let phaseCont = unwrap(p: phase[batchIdx])
+      // NO PHASE UNWRAP. It was provably the identity on every input this
+      // function receives, so it cost a full pass over the phase array — and
+      // several MLX ops per batch item — to return its argument.
+      //
+      // `unwrap` zeroed its correction wherever |diff| < pi. `inverse` is called
+      // from exactly one place, Generator's `stft.inverse(magnitude:phase:)`,
+      // and that phase is `MLX.sin(...)`, so it lies in [-1, 1]. Consecutive
+      // differences are then at most 2, and 2 < pi, so the correction was zero
+      // everywhere and the result was its input.
+      //
+      // `UnwrapIsIdentityTests` reproduces the removed algorithm and asserts
+      // exactly that over sin-bounded input, so this is checked rather than
+      // reasoned about. IF A CALLER EVER PASSES PHASE NOT BOUNDED BY PI — an
+      // atan2 phase from `transform`, say — the unwrap has to come back. The
+      // test names that condition explicitly.
+      let phaseCont = phase[batchIdx]
 
       // Combine magnitude and phase
       let stft = magnitude[batchIdx] * MLX.exp(MLXArray(real: 0, imaginary: 1) * phaseCont)
@@ -240,7 +239,7 @@ class MLXSTFT {
         x: stft,
         hopLength: hopLength,
         winLength: winLength,
-        window: window
+        window: cachedWindow
       )
       reconstructed.append(audio)
     }
