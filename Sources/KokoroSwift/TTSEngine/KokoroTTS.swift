@@ -174,15 +174,28 @@ public final class KokoroTTS {
     BenchmarkTimer.startTimer(Constants.bm_TTS)
 
     // Step 1: Convert text to phonemes
+    // PER-STAGE TIMING (halfmarble 2026-09-09). The bm_ constants below were
+    // declared upstream and never used — only the TTSAudio total was wired, so
+    // nobody could see WHERE a synthesis spent its time. Each stage is timed
+    // with bm_TTS as its parent, so the report nests under the total.
+    BenchmarkTimer.startTimer(Constants.bm_Phonemize, Constants.bm_TTS)
     let (phonemizedText, tokenArray) = try phonemizeText(text)
+    BenchmarkTimer.stopTimer(Constants.bm_Phonemize)
     
     // Step 2: Tokenize and prepare input
+    BenchmarkTimer.startTimer(Constants.bm_prepare, Constants.bm_TTS)
     let (paddedInputIds, attentionMask, inputLengths, textMask, inputIds) = try prepareInputTensors(phonemizedText)
+    if Self.profileStages { MLX.eval(paddedInputIds, attentionMask, inputLengths, textMask) }
+    BenchmarkTimer.stopTimer(Constants.bm_prepare)
     
     // Step 3: Extract style embeddings from voice
+    BenchmarkTimer.startTimer(Constants.bm_style, Constants.bm_TTS)
     let (globalStyle, acousticStyle) = extractStyleEmbeddings(from: voice, tokenCount: inputIds.count)
+    if Self.profileStages { MLX.eval(globalStyle, acousticStyle) }
+    BenchmarkTimer.stopTimer(Constants.bm_style)
     
     // Step 4: Encode text with BERT and predict duration
+    BenchmarkTimer.startTimer(Constants.bm_bert, Constants.bm_TTS)
     let durationFeatures = encodeBERTAndDuration(
       inputIds: paddedInputIds,
       attentionMask: attentionMask,
@@ -191,24 +204,41 @@ public final class KokoroTTS {
       style: globalStyle
     )
     
+    if Self.profileStages { MLX.eval(durationFeatures) }
+    BenchmarkTimer.stopTimer(Constants.bm_bert)
+
     // Step 5: Predict phoneme durations
+    BenchmarkTimer.startTimer(Constants.bm_duration, Constants.bm_TTS)
     let (predictedDurations, alignmentTarget) = predictDurations(
       features: durationFeatures,
       batchSize: paddedInputIds.shape[1],
       speed: speed
     )
     
+    if Self.profileStages { MLX.eval(predictedDurations, alignmentTarget) }
+    BenchmarkTimer.stopTimer(Constants.bm_duration)
+
     // Step 6: Generate aligned encodings
+    BenchmarkTimer.startTimer(Constants.bm_align, Constants.bm_TTS)
     let alignedEncoding = durationFeatures.transposed(0, 2, 1).matmul(alignmentTarget)
+    if Self.profileStages { MLX.eval(alignedEncoding) }
+    BenchmarkTimer.stopTimer(Constants.bm_align)
     
     // Step 7: Predict prosody (F0, pitch)
+    BenchmarkTimer.startTimer(Constants.bm_prosody, Constants.bm_TTS)
     let (f0Prediction, nPrediction) = prosodyPredictor.F0NTrain(x: alignedEncoding, s: globalStyle)
+    if Self.profileStages { MLX.eval(f0Prediction, nPrediction) }
+    BenchmarkTimer.stopTimer(Constants.bm_prosody)
     
     // Step 8: Encode text for decoder
+    BenchmarkTimer.startTimer(Constants.bm_textenc, Constants.bm_TTS)
     let textEncoding = textEncoder(paddedInputIds, inputLengths: inputLengths, m: textMask)
     let asrFeatures = MLX.matmul(textEncoding, alignmentTarget)
+    if Self.profileStages { MLX.eval(textEncoding, asrFeatures) }
+    BenchmarkTimer.stopTimer(Constants.bm_textenc)
     
     // Step 9: Generate audio
+    BenchmarkTimer.startTimer(Constants.bm_decoder, Constants.bm_TTS)
     let audio = decoder(
       asr: asrFeatures,
       F0Curve: f0Prediction,
@@ -216,15 +246,29 @@ public final class KokoroTTS {
       s: acousticStyle
     )[0]
     
+    if Self.profileStages { MLX.eval(audio) }
+    BenchmarkTimer.stopTimer(Constants.bm_decoder)
+
     // Try to predict timestamp of each token if G2P processor returns tokens
     if let tokenArray {
       TimestampPredictor.preditTimestamps(tokens: tokenArray, predictionDuration: predictedDurations)
     }
     
+    // THE LAZY TAIL, and it must be INSIDE the total. MLX builds a graph
+    // above; this is where it is forced to produce numbers, so deferred GPU
+    // work is charged here rather than to the stage that queued it. Timing it
+    // after `stopTimer(bm_TTS)` would leave the total excluding the one line
+    // most likely to hold the missing 400 ms — which is what the first version
+    // of this patch did, caught by checking that every start nests in the
+    // total before building.
+    BenchmarkTimer.startTimer(Constants.bm_materialise, Constants.bm_TTS)
+    let samples = audio[0].asArray(Float.self)
+    BenchmarkTimer.stopTimer(Constants.bm_materialise)
+
     // Stop performance timing
     BenchmarkTimer.stopTimer(Constants.bm_TTS)
 
-    return (audio[0].asArray(Float.self), tokenArray)
+    return (samples, tokenArray)
   }
   
   /// Updates the G2P language if it differs from the current language.
@@ -377,6 +421,23 @@ public final class KokoroTTS {
     return alignmentTarget.expandedDimensions(axis: 0)
   }
   
+  /// FORCE EVALUATION AT EACH STAGE BOUNDARY, so a stage timer measures the
+  /// work it queued rather than the cost of queueing it.
+  ///
+  /// OFF BY DEFAULT AND IT MUST STAY OFF IN NORMAL USE. MLX is lazy: it builds
+  /// a graph and executes when something demands values. That is a performance
+  /// FEATURE — it lets the framework fuse and reorder — and `eval` after every
+  /// stage defeats it, serialising the pipeline into synchronous chunks. So
+  /// this changes the thing it measures: total time under profiling is not the
+  /// total a driver experiences, and the two must never be quoted together.
+  ///
+  /// It exists because without it the stage numbers are meaningless. Measured
+  /// 2026-09-09 on the phone: `materialise` — the single line that first
+  /// demands values — was 47% and 68% of a synthesis, because every stage above
+  /// it was timing graph CONSTRUCTION. The per-stage figures that produced were
+  /// reported, believed, and had to be retracted.
+  public nonisolated(unsafe) static var profileStages = false
+
   /// Constants used throughout the TTS engine.
   public struct Constants {
     /// Maximum number of tokens allowed in input
@@ -392,5 +453,15 @@ public final class KokoroTTS {
     static let bm_duration = "Duration"
     static let bm_prosody = "Prosody"
     static let bm_decoder = "Decoder"
+    // THE STEPS UPSTREAM NEVER NAMED (halfmarble 2026-09-09). With only the
+    // five above, 400 ms of a 566 ms first synthesis fell outside every stage.
+    // `bm_materialise` is the important one: MLX is LAZY, so a stage timer
+    // measures GRAPH CONSTRUCTION, and the deferred GPU work lands wherever
+    // something first forces evaluation — here, `asArray`.
+    static let bm_prepare = "Prepare"
+    static let bm_style = "Style"
+    static let bm_align = "Align"
+    static let bm_textenc = "TextEncode"
+    static let bm_materialise = "Materialise"
   }
 }
