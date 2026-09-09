@@ -231,18 +231,17 @@ public final class KokoroTTS {
 
     // Step 5: Predict phoneme durations
     BenchmarkTimer.startTimer(Constants.bm_duration, Constants.bm_TTS)
-    let (predictedDurations, alignmentTarget) = predictDurations(
+    let (predictedDurations, alignmentIndices) = predictDurations(
       features: durationFeatures,
-      batchSize: paddedInputIds.shape[1],
       speed: speed
     )
     
-    if Self.profileStages { MLX.eval(predictedDurations, alignmentTarget) }
+    if Self.profileStages { MLX.eval(predictedDurations, alignmentIndices) }
     BenchmarkTimer.stopTimer(Constants.bm_duration)
 
     // Step 6: Generate aligned encodings
     BenchmarkTimer.startTimer(Constants.bm_align, Constants.bm_TTS)
-    let alignedEncoding = durationFeatures.transposed(0, 2, 1).matmul(alignmentTarget)
+    let alignedEncoding = durationFeatures.transposed(0, 2, 1).take(alignmentIndices, axis: 2)
     if Self.profileStages { MLX.eval(alignedEncoding) }
     BenchmarkTimer.stopTimer(Constants.bm_align)
     
@@ -255,7 +254,7 @@ public final class KokoroTTS {
     // Step 8: Encode text for decoder
     BenchmarkTimer.startTimer(Constants.bm_textenc, Constants.bm_TTS)
     let textEncoding = textEncoder(paddedInputIds, inputLengths: inputLengths, m: textMask)
-    let asrFeatures = MLX.matmul(textEncoding, alignmentTarget)
+    let asrFeatures = textEncoding.take(alignmentIndices, axis: 2)
     if Self.profileStages { MLX.eval(textEncoding, asrFeatures) }
     BenchmarkTimer.stopTimer(Constants.bm_textenc)
     
@@ -400,7 +399,9 @@ public final class KokoroTTS {
   ///   - batchSize: Size of the input batch
   ///   - speed: Speech speed multiplier
   /// - Returns: Predicted durations and alignment target matrix for duration expansion
-  private func predictDurations(features: MLXArray, batchSize: Int, speed: Float) -> (MLXArray, MLXArray) {
+  // `batchSize` is gone: it existed only to size the one-hot alignment matrix,
+  // which no longer exists.
+  private func predictDurations(features: MLXArray, speed: Float) -> (MLXArray, MLXArray) {
     // Pass through LSTM
     let (lstmOutput, _) = predictorLSTM(features)
     
@@ -411,36 +412,39 @@ public final class KokoroTTS {
     let durationSigmoid = MLX.sigmoid(durationLogits).sum(axis: -1) / speed
     let predictedDurations = MLX.clip(durationSigmoid.round(), min: 1).asType(.int32)[0]
     
-    // Create alignment matrix
-    return (predictedDurations, createAlignmentTarget(durations: predictedDurations, batchSize: batchSize))
+    // Per-frame phoneme indices. NOT a one-hot matrix any more — see
+    // createAlignmentIndices.
+    return (predictedDurations, createAlignmentIndices(durations: predictedDurations))
   }
   
-  /// Creates an alignment target matrix from predicted durations. Maps each phoneme to multiple frames based on duration.
-  /// Each row corresponds to a phoneme, and columns represent frames.
-  /// - Parameters:
-  ///   - durations: Predicted duration for each phoneme
-  ///   - batchSize: Size of the input batch
-  /// - Returns: Alignment matrix [batchSize × totalFrames]
-  private func createAlignmentTarget(durations: MLXArray, batchSize: Int) -> MLXArray {
-    // Create indices array by repeating each index according to its duration
-    let indices = MLX.concatenated(
+  /// Per-frame phoneme indices: element `f` is the phoneme sounding at frame `f`,
+  /// each phoneme repeated as many times as its predicted duration.
+  ///
+  /// THIS USED TO RETURN A ONE-HOT `[phonemes x frames]` MATRIX, and the callers
+  /// multiplied by it. A one-hot matmul is a gather written the long way —
+  /// `matmul(X, onehot)[:, :, f]` is exactly `X[:, :, indices[f]]` — so the
+  /// matrix was built, uploaded and multiplied to express a selection.
+  ///
+  /// Removing it deletes three costs, the third being the one that matters:
+  ///   * a `phonemes * frames` Float allocation on the host, per synthesis;
+  ///   * a matmul over that matrix, per synthesis, twice;
+  ///   * **a `.item()` call PER FRAME** in the loop that filled it. Each one is
+  ///     a GPU->CPU synchronisation, so a sentence of several hundred frames
+  ///     paid several hundred round trips before any audio existed.
+  ///
+  /// Suggested by @antacosta's fork, which replaced the same two matmuls with
+  /// `.take(_:axis:)` after diagnosing them as returning values unrelated to the
+  /// selected column. **That correctness failure did not reproduce here**: on
+  /// this machine matmul and gather agree to 1e-4 both at toy size and at
+  /// [1,512,64]x[64,576], asserted in GatherEquivalenceTests. This change is
+  /// taken for the cost above, and it removes the exposure either way.
+  private func createAlignmentIndices(durations: MLXArray) -> MLXArray {
+    MLX.concatenated(
       durations.enumerated().map { index, duration in
         let frameCount: Int = duration.item()
-        return MLX.repeated(MLXArray([index]), count: frameCount)
+        return MLX.repeated(MLXArray([Int32(index)]), count: frameCount)
       }
     )
-
-    // Create one-hot encoded alignment matrix
-    let totalFrames = indices.shape[0]
-    var alignmentArray = [Float](repeating: 0.0, count: totalFrames * batchSize)
-    
-    for frame in 0 ..< totalFrames {
-      let phonemeIndex: Int = indices[frame].item()
-      alignmentArray[phonemeIndex * totalFrames + frame] = 1.0
-    }
-    
-    let alignmentTarget = MLXArray(alignmentArray).reshaped([batchSize, totalFrames])
-    return alignmentTarget.expandedDimensions(axis: 0)
   }
   
   /// FORCE EVALUATION AT EACH STAGE BOUNDARY, so a stage timer measures the
