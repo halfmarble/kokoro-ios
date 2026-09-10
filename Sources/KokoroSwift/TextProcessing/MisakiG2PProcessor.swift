@@ -38,20 +38,19 @@ final class MisakiG2PProcessor : G2PProcessor {
     return misaki.phonemize(text: input)
   }
 
-  /// **RETURNS ZEROS UNTIL OUR MISAKI MEMOIZES ITS OOV LOOKUPS.** Deliberately
-  /// left as the protocol default rather than reaching into `EnglishG2P`:
-  /// halfmarble/MisakiSwift exposes no fallback statistics, so there is nothing
-  /// to read and inventing a number here would be worse than reporting none.
+  /// Forwards to `EnglishG2P.consumeFallbackStats()` — the OOV fallback cache
+  /// and its lookup/hit counters shipped in halfmarble/MisakiSwift 2.2.1, which
+  /// is now this package's minimum for exactly that reason.
   ///
-  /// When it does, this becomes:
-  ///
-  ///     guard let misaki else { return (0, 0) }
-  ///     let stats = misaki.consumeFallbackStats()
-  ///     return (stats.lookups, stats.hits)
-  ///
-  /// which is how @ahh1539's fork reads it, against THEIR MisakiSwift fork at
-  /// 1.0.12 — a different lineage from ours, so this is a port and not a pin
-  /// bump.
+  /// `misaki` is `nil` before `setLanguage(_:)` runs, the same guard as
+  /// `process(input:)` above — but this returns the default rather than
+  /// throwing, because a caller reading stats after a failed `process` should
+  /// see "nothing to report", not a second error.
+  func consumeFallbackStats() -> (lookups: Int, hits: Int) {
+    guard let misaki else { return (0, 0) }
+    let stats = misaki.consumeFallbackStats()
+    return (stats.lookups, stats.hits)
+  }
 }
 
 #endif

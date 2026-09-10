@@ -215,6 +215,11 @@ memoizes its out-of-vocabulary lookups — halfmarble/MisakiSwift 2.2.1 does —
 override rather than a change here. Tests pin both sides, so they will not keep passing silently
 once real numbers arrive.
 
+**Since 2.0.10 the Misaki processor performs that override:** `MisakiG2PProcessor` forwards to
+`EnglishG2P.consumeFallbackStats()`, so against halfmarble/MisakiSwift 2.2.1 or later the two
+`KokoroTTS` counters carry the real lookup and hit counts after each synthesis. Against an older
+MisakiSwift they still read zero.
+
 ## Profiling
 
 ### Per-stage synthesis timers, behind a flag — since 2.0.1

@@ -1,13 +1,13 @@
 {
-  "originHash" : "2ef1706ced4dfad2ec9c040fb1eb351d06523e514724b112b08f54575fe36ee4",
+  "originHash" : "322ead887256321d0111700bb76e8d24b5ac34afec8efcdf033aa98c8b7c1bec",
   "pins" : [
     {
       "identity" : "misakiswift",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/halfmarble/MisakiSwift.git",
       "state" : {
-        "revision" : "692740491e1fa112c4dd49861df06b4370adef72",
-        "version" : "2.0.0"
+        "revision" : "a35b14ee9f74cc68db3536118740b202758da487",
+        "version" : "2.2.1"
       }
     },
     {

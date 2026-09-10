@@ -54,7 +54,7 @@ let package = Package(
     // mlx-swift 0.31.6 pin and the (20, "twenty") number fix. 2.0.0 is the
     // fork's first own tag; the major bump reflects the rename and the change
     // in product linkage, both breaking against upstream 1.0.6.
-    .package(url: "https://github.com/halfmarble/MisakiSwift.git", from: "2.0.0"),
+    .package(url: "https://github.com/halfmarble/MisakiSwift.git", from: "2.2.1"),
     .package(url: "https://github.com/mlalma/MLXUtilsLibrary.git", exact: "0.0.6")
   ],
   targets: [
