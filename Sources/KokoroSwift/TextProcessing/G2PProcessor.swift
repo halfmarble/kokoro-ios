@@ -27,4 +27,19 @@ protocol G2PProcessor {
   /// - Returns: A phonetic string representation of the input text and optionally arrays of tokens.
   /// - Throws: `G2PProcessorError.processorNotInitialized` if `setLanguage(_:)` has not been called.
   func process(input: String) throws -> (String, [MToken]?)
+
+  /// Out-of-vocabulary fallback lookups and hits for the most recent `process`.
+  ///
+  /// Consuming: each call reports the counts since the previous call and resets
+  /// them, so a caller reading once per `process` sees that call's figures
+  /// rather than a running total.
+  func consumeFallbackStats() -> (lookups: Int, hits: Int)
+}
+
+extension G2PProcessor {
+  /// **THE DEFAULT IS ZEROS, AND MOST ENGINES WILL KEEP IT.** An engine with no
+  /// OOV fallback, or one whose fallback is not memoized, has nothing to
+  /// report. Returning zeros rather than making this a required method means
+  /// adding the memoization later is a single override.
+  func consumeFallbackStats() -> (lookups: Int, hits: Int) { (0, 0) }
 }

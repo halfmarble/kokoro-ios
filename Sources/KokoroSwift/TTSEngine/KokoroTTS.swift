@@ -24,11 +24,28 @@ import MLXUtilsLibrary
 /// ```
 public final class KokoroTTS {
   /// Errors from the TTS side
-  public enum KokoroTTSError: Error {
+  public enum KokoroTTSError: Error, Equatable {
     /// Thrown when input text exceeds maximum token count
     case tooManyTokens
+    /// Thrown BEFORE the prosody and decoder graphs are built, when the
+    /// predicted durations sum to more frames than the caller allowed.
+    case durationLimitExceeded(totalFrames: Int, maximumFrames: Int)
   }
   
+  /// OOV fallback lookups and hits from the most recent `generateAudio`.
+  ///
+  /// **THESE READ ZERO TODAY AND THAT IS EXPECTED.** The numbers come from the
+  /// G2P, via `G2PProcessor.consumeFallbackStats()`, whose default
+  /// implementation returns `(0, 0)`. Our MisakiSwift does not yet memoize its
+  /// out-of-vocabulary BART lookups, so there is nothing to report; the
+  /// counters exist so that when it does, the surfacing is already wired and
+  /// the change is one override rather than a change to this class.
+  ///
+  /// Adapted from @ahh1539's fork, whose own MisakiSwift fork (theirs, at
+  /// 1.0.12 — NOT mlalma's) added the memoization these read.
+  public private(set) var lastG2PFallbackLookups = 0
+  public private(set) var lastG2PFallbackHits = 0
+
   /// BERT model for encoding phoneme sequences
   private let bert: CustomAlbert!
   
@@ -197,7 +214,8 @@ public final class KokoroTTS {
     language: Language,
     text: String,
     speed: Float = 1.0,
-    predictTimestamps: Bool = true
+    predictTimestamps: Bool = true,
+    maximumDurationFrames: Int = Constants.maxDurationFrames
   ) throws -> ([Float], [MToken]?) {
     // Update language if it has changed
     try updateLanguageIfNeeded(language)
@@ -242,9 +260,10 @@ public final class KokoroTTS {
 
     // Step 5: Predict phoneme durations
     BenchmarkTimer.startTimer(Constants.bm_duration, Constants.bm_TTS)
-    let (predictedDurations, alignmentIndices) = predictDurations(
+    let (predictedDurations, alignmentIndices) = try predictDurations(
       features: durationFeatures,
-      speed: speed
+      speed: speed,
+      maximumDurationFrames: maximumDurationFrames
     )
     
     if Self.profileStages { MLX.eval(predictedDurations, alignmentIndices) }
@@ -317,10 +336,18 @@ public final class KokoroTTS {
   
   /// Converts input text to phonemes using the G2P processor.
   private func phonemizeText(_ text: String) throws -> (String, [MToken]?) {
-    let phonemizedOutput = try g2pProcessor?.process(input: text)
-    guard let phonemizedOutput else {
+    // Guard the PROCESSOR rather than the result. Same outcome — the old
+    // `try g2pProcessor?.process(...)` produced nil only when the processor was
+    // nil, since `process` cannot return nil — but the stats read below needs a
+    // non-optional processor, and checking the thing that can actually be
+    // missing reads better than checking a value that stands in for it.
+    guard let g2pProcessor else {
       throw G2PProcessorError.processorNotInitialized
     }
+    let phonemizedOutput = try g2pProcessor.process(input: text)
+    let (lookups, hits) = g2pProcessor.consumeFallbackStats()
+    lastG2PFallbackLookups = lookups
+    lastG2PFallbackHits = hits
     return phonemizedOutput
   }
   
@@ -416,7 +443,11 @@ public final class KokoroTTS {
   /// - Returns: Predicted durations and alignment target matrix for duration expansion
   // `batchSize` is gone: it existed only to size the one-hot alignment matrix,
   // which no longer exists.
-  private func predictDurations(features: MLXArray, speed: Float) -> (MLXArray, MLXArray) {
+  private func predictDurations(
+    features: MLXArray,
+    speed: Float,
+    maximumDurationFrames: Int
+  ) throws -> (MLXArray, MLXArray) {
     // Pass through LSTM
     let (lstmOutput, _) = predictorLSTM(features)
     
@@ -429,7 +460,9 @@ public final class KokoroTTS {
     
     // Per-frame phoneme indices. NOT a one-hot matrix any more — see
     // createAlignmentIndices.
-    return (predictedDurations, createAlignmentIndices(durations: predictedDurations))
+    return (predictedDurations,
+            try createAlignmentIndices(durations: predictedDurations,
+                                       maximumDurationFrames: maximumDurationFrames))
   }
   
   /// Per-frame phoneme indices: element `f` is the phoneme sounding at frame `f`,
@@ -453,7 +486,10 @@ public final class KokoroTTS {
   /// this machine matmul and gather agree to 1e-4 both at toy size and at
   /// [1,512,64]x[64,576], asserted in GatherEquivalenceTests. This change is
   /// taken for the cost above, and it removes the exposure either way.
-  private func createAlignmentIndices(durations: MLXArray) -> MLXArray {
+  private func createAlignmentIndices(
+    durations: MLXArray,
+    maximumDurationFrames: Int
+  ) throws -> MLXArray {
     // ONE host read for the whole duration vector, then expand in Swift.
     //
     // This loop used to call `.item()` once PER PHONEME — a GPU->CPU
@@ -462,6 +498,14 @@ public final class KokoroTTS {
     // the host either way; reading them in one go costs one synchronisation
     // instead of N, and the expansion is a Swift array append.
     let swiftDurations = durations.asArray(Int32.self)
+    // THE BUDGET IS CHECKED HERE, and here is the earliest it can be: the
+    // durations only exist on the host from the line above. Everything after
+    // this point — the index vector, the aligned encodings, the prosody LSTMs
+    // and the decoder — is sized by their sum.
+    try Self.validateDurationBudget(
+      totalFrames: Self.totalFrames(swiftDurations),
+      maximumFrames: maximumDurationFrames
+    )
     return MLXArray(Self.expandDurations(swiftDurations))
   }
 
@@ -475,6 +519,31 @@ public final class KokoroTTS {
       indices.append(contentsOf: repeatElement(Int32(phoneme), count: Int(duration)))
     }
     return indices
+  }
+
+  /// How many frames `expandDurations` will emit for this vector.
+  ///
+  /// **DELIBERATELY MIRRORS `expandDurations`'s OWN ARITHMETIC**, including the
+  /// `max(0,)` clamp and the `> 0` skip. A budget check that counts something
+  /// other than what the allocation actually produces is a check of a different
+  /// quantity, and would drift silently the first time either side changed.
+  /// `TotalFramesMatchesExpansionTests` asserts the two agree.
+  static func totalFrames(_ durations: [Int32]) -> Int {
+    durations.reduce(0) { $0 + Int(max(0, $1)) }
+  }
+
+  /// Pure, `static` and model-free so the tests can pin it exactly.
+  ///
+  /// A ZERO OR NEGATIVE BUDGET ALWAYS THROWS — it is a caller error, not a way
+  /// to disable the guard. To opt out, pass `Int.max`, which is honest about
+  /// what it means and shows up in a search.
+  static func validateDurationBudget(totalFrames: Int, maximumFrames: Int) throws {
+    guard maximumFrames > 0, totalFrames <= maximumFrames else {
+      throw KokoroTTSError.durationLimitExceeded(
+        totalFrames: totalFrames,
+        maximumFrames: maximumFrames
+      )
+    }
   }
 
   /// The two masks for a single, fully-valid sequence of `inputLength`
@@ -506,6 +575,46 @@ public final class KokoroTTS {
   public struct Constants {
     /// Maximum number of tokens allowed in input
     public static let maxTokenCount = 510
+
+    /// Largest decoder graph `generateAudio` will build, in duration frames.
+    /// Kokoro emits 40 frames per second of audio, so this is 60 seconds.
+    ///
+    /// **THIS IS A RUNAWAY CEILING, NOT A LENGTH POLICY.** It exists to turn a
+    /// pathological duration prediction into a thrown error the caller can
+    /// handle, instead of a decoder allocation sized by that prediction. It is
+    /// deliberately far above anything real speech reaches, because a guard
+    /// that fires on ordinary input is worse than no guard — callers learn to
+    /// raise it, and then it protects nothing.
+    ///
+    /// **NOT @ahh1539's 700, AND THE DIFFERENCE IS MEASURED.** Their fork
+    /// defaults to 700 frames (17.5 s), which suits a caller synthesizing short
+    /// utterances. Measured with these weights at F16, voice af_nova, caching
+    /// off, frames computed exactly as `samples / 600`:
+    ///
+    ///     94 words   918 frames   22.9 s    9.8 frames/word
+    ///     37 words   504 frames             13.6
+    ///     17 words   253 frames             14.9
+    ///      8 words   120 frames             15.0
+    ///
+    /// **The 94-word sentence alone exceeds 700**, so for a caller that speaks
+    /// whole sentences that default throws on ordinary speech, not on a
+    /// runaway.
+    ///
+    /// Note frames-per-word FALLS as a sentence lengthens — long sentences
+    /// carry more short function words — so the worst case is not the longest
+    /// text. Taking the densest observed rate against a ~90-word ceiling, which
+    /// is about as long as a single spoken sentence gets, gives 15 x 89 = 1,335
+    /// frames; this constant sits 1.8x above that.
+    ///
+    /// **AN EARLIER VERSION OF THIS COMMENT SAID ~1,424 FRAMES, FROM AN
+    /// ASSUMED 2.5 WORDS PER SECOND. THAT WAS WRONG** — the measurement says
+    /// 4.1. The conclusion happened to survive; the arithmetic did not, which
+    /// is why the number above is now measured rather than reasoned.
+    ///
+    /// `maxTokenCount` does NOT already bound this: 510 phonemes at a typical
+    /// 3-8 frames each spans roughly 38 to 102 seconds, so the token cap and
+    /// this ceiling are far apart and both are needed.
+    public static let maxDurationFrames = 2400
     
     /// Audio sampling rate in Hz
     public static let samplingRate = 24000
