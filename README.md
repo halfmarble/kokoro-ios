@@ -3,9 +3,10 @@
 > **What this is.** A fork of [mlalma/kokoro-ios](https://github.com/mlalma/kokoro-ios)
 > carrying the correctness, performance and packaging fixes we needed to ship this package in
 > an iOS app, kept here so others can use them. Upstream has been quiet since January 2026.
-> Nothing here is novel — most changes have an upstream issue, or come from another public fork
-> of this package, and are credited where they do. The value is the set, applied together and
-> tested as a set, which no single upstream PR gives you.
+> Nothing here is novel. The four packaging problems are each reported upstream — by other
+> people, whose issues are linked — and several other changes come from public forks of this
+> package and are credited where they do. The value is the set, applied together and tested as
+> a set, which no single upstream PR gives you.
 >
 > **[FORK_CHANGES.md](FORK_CHANGES.md) lists every change, what it fixes, and which release it
 > first shipped in.** In short: an interpolation index that wrapped to the end of the input; two
@@ -19,9 +20,11 @@
 > enabling it would extend that licence to anything linking this package. MisakiSwift is the
 > only phonemizer here.
 >
-> **What this is not.** Not a hostile fork, and not a claim that upstream is wrong. Everything
-> here has been reported upstream, and if upstream merges these we would rather you used
-> upstream.
+> **What this is not.** Not a hostile fork, and not a claim that upstream is wrong. Where a
+> problem here has an upstream issue we link it, and if upstream fixes these we would rather
+> you used upstream. **We have not ourselves filed any of it upstream**, and the performance
+> and correctness work in particular has not been offered to upstream by anyone — see
+> [FORK_CHANGES.md](FORK_CHANGES.md#upstream-status).
 >
 > **Maintenance.** halfmarble maintains this fork and intends to keep fixing and extending it,
 > because we ship it in production software — bugs here reach real users, so they get fixed

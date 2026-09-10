@@ -5,12 +5,41 @@ Everything [halfmarble/kokoro-ios](https://github.com/halfmarble/kokoro-ios) car
 first shipped in. The README says what the fork *is*; this file tracks what is *in* it, and it
 is updated in the same commit as the change it describes.
 
-Nothing here is novel. Most entries have an upstream issue, or come from another public fork of
-this package, and are credited where they do. The value is the set, applied together and tested
-as a set — which no single upstream pull request gives you.
+Nothing here is novel, and the upstream position is set out under
+[Upstream status](#upstream-status) below rather than implied: the packaging problems are each
+reported upstream by other people, most of the rest is not reported upstream by anyone, and none
+of it was filed by us. Several changes come from public forks of this package and are credited
+where they do. The value is the set, applied together and tested as a set — which no single
+upstream pull request gives you.
 
 **Fork releases start at 2.0.0.** The inherited `1.0.x` tags are upstream's code and carry none
 of this. Pin an exact version if you need one: there is no compatibility promise.
+
+## Upstream status
+
+Stated plainly, because a fork that implies more upstream engagement than it has is worse than
+one that claims none.
+
+**We have not filed any of this with upstream.** Every upstream issue linked below was opened by
+somebody else who hit the same problem; we link them because they are the public record of the
+problem, not because they are ours.
+
+| change | upstream |
+|---|---|
+| Resource bundle rename | reported by others: [#31](https://github.com/mlalma/kokoro-ios/issues/31), and [#35](https://github.com/mlalma/kokoro-ios/pull/35) takes a different approach |
+| mlx-swift pin | reported by others: [#30](https://github.com/mlalma/kokoro-ios/issues/30), [#28](https://github.com/mlalma/kokoro-ios/issues/28), [#29](https://github.com/mlalma/kokoro-ios/pull/29) |
+| Static linking | reported by another: [#26](https://github.com/mlalma/kokoro-ios/issues/26) |
+| `MLXFast` dependency | **is** an upstream PR — [#36](https://github.com/mlalma/kokoro-ios/pull/36), by [@rodexyh](https://github.com/rodexyh), carried here |
+| Log-magnitude clamp, `SineGen` trim | reported in [Blaizzy/mlx-audio](https://github.com/Blaizzy/mlx-audio) #815 and #803, the Python project this ports — **not** to this package |
+| Everything else | **not offered upstream by anyone**, here or elsewhere |
+
+That last row covers the interpolation clamp, the gather, the ALBERT LayerNorm load, the three
+removed host synchronisations, the phase unwrap, the duration budget, `preloadG2P`, the fallback
+statistics, the stage timers and CI. Several came from other people's public forks and are
+credited in place; none has been proposed to this package's maintainer.
+
+If you want any of it upstream, the fork's commits are self-contained and you are welcome to
+take them there.
 
 ## Correctness
 
@@ -231,10 +260,13 @@ All of these are in **2.0.0**, and all are what it takes to ship this package in
   runtimes in one process, duplicate Objective-C class warnings at launch, and crashes that were
   hard to attribute to it. Upstream
   [#26](https://github.com/mlalma/kokoro-ios/issues/26).
-- **`MLXFast` declared as a target dependency.** `BuildingBlocks/LayerNormInference.swift` imports
-  it and calls `MLXFast.layerNorm(...)`, but the manifest never declared it. macOS `swift build`
-  resolves it through transitive caching; an Xcode iOS device build fails at module resolution
-  with "No such module 'MLXFast'".
+- **`MLXFast` declared as a target dependency**, which is
+  [@rodexyh](https://github.com/rodexyh)'s change, taken from their open upstream pull request
+  [#36](https://github.com/mlalma/kokoro-ios/pull/36) and carried here with their commit and
+  authorship intact. `BuildingBlocks/LayerNormInference.swift` imports `MLXFast` and calls
+  `MLXFast.layerNorm(...)`, but the manifest never declared it. macOS `swift build` resolves it
+  through transitive caching; an Xcode iOS device build fails at module resolution with
+  "No such module 'MLXFast'".
 - **The G2P dependency points at
   [halfmarble/MisakiSwift](https://github.com/halfmarble/MisakiSwift)**, which carries the
   matching resource rename and its own pronunciation fixes. That fork's releases also start at
