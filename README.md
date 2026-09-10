@@ -1,47 +1,33 @@
 # Kokoro TTS for Swift — halfmarble fork
 
 > **What this is.** A fork of [mlalma/kokoro-ios](https://github.com/mlalma/kokoro-ios)
-> carrying the fixes we needed to ship this package in an iOS app, kept here so others
-> can use them. Upstream has been quiet since January 2026 and has thirteen open issues
-> and pull requests; several cover the same ground independently. Nothing here is novel
-> — it is these fixes applied together and tested as a set, which no single upstream PR
-> gives you.
+> carrying the correctness, performance and packaging fixes we needed to ship this package in
+> an iOS app, kept here so others can use them. Upstream has been quiet since January 2026.
+> Nothing here is novel — most changes have an upstream issue, or come from another public fork
+> of this package, and are credited where they do. The value is the set, applied together and
+> tested as a set, which no single upstream PR gives you.
 >
-> - **iOS codesign rejected the resource bundle** whose top-level folder is literally
->   named `Resources`, failing with "bundle format unrecognized". Renamed to
->   `KokoroData/`, with the one `Bundle.module` lookup updated to match. Reported
->   upstream as [#31](https://github.com/mlalma/kokoro-ios/issues/31).
-> - **mlx-swift 0.30.2 will not link against the iOS 26 simulator SDK** — undefined
->   `_MTLTensorDomain` and `_MTLIOErrorDomain`. Pinned to 0.31.6. Reported upstream as
->   [#30](https://github.com/mlalma/kokoro-ios/issues/30); see also
->   [#28](https://github.com/mlalma/kokoro-ios/issues/28) on the exact pins. Note that
->   mlx-swift 0.31.5 and later ship a Linux-only `CudaBuild` plugin, so command-line
->   builds need `-skipPackagePluginValidation` and Xcode asks once to trust it.
-> - **Two MLX runtimes in one process.** The library product's explicit
->   `type: .dynamic` embedded MLX and MLXNN as frameworks while packages such as MLXLLM
->   linked the same modules statically — objc duplicate class warnings at launch, and
->   crashes that were hard to attribute to it. The product now links statically like its
->   dependencies. Reported upstream as
->   [#26](https://github.com/mlalma/kokoro-ios/issues/26).
-> - **The G2P dependency points at [halfmarble/MisakiSwift](https://github.com/halfmarble/MisakiSwift)
->   2.0.0**, which carries the matching resource rename and a number-to-words fix:
->   `(20, "twenty")` was missing, so every 21-29 was spoken as its units digit alone —
->   "24" as "four", and 2024 as "24" because four-digit tokens route through
->   `toYear()`. That fork's own tags start at 2.0.0; its inherited 1.0.x tags are
->   upstream's code and contain none of this.
+> **[FORK_CHANGES.md](FORK_CHANGES.md) lists every change, what it fixes, and which release it
+> first shipped in.** In short: an interpolation index that wrapped to the end of the input; two
+> audio guards carried from the upstream Python project, one of which matters more at F16; a
+> bounded decoder duration; several host synchronisations and a provably-identity phase unwrap
+> removed from the synthesis path; `preloadG2P` so a caller can place the first-call cost. Plus
+> the four things it takes to ship on iOS — the resource bundle rename, the mlx-swift pin,
+> static linking, and a missing `MLXFast` dependency.
 >
-> **The espeak-ng G2P path stays commented out**, as upstream leaves it. It is GPL-3.0,
-> and enabling it would extend that licence to anything linking this package.
-> MisakiSwift is the only phonemizer here.
+> **The espeak-ng G2P path stays commented out**, as upstream leaves it. It is GPL-3.0, and
+> enabling it would extend that licence to anything linking this package. MisakiSwift is the
+> only phonemizer here.
 >
-> **What this is not.** Not a hostile fork, and not a claim that upstream is wrong.
-> Everything here has been reported upstream, and if upstream merges these we would
-> rather you used upstream.
+> **What this is not.** Not a hostile fork, and not a claim that upstream is wrong. Everything
+> here has been reported upstream, and if upstream merges these we would rather you used
+> upstream.
 >
-> **Maintenance.** halfmarble maintains this fork and intends to keep fixing and
-> extending it, because we ship it in production software — bugs here reach real users,
-> so they get fixed here first. Issues and pull requests are welcome. We make no
-> release-cadence or backwards-compatibility promise; pin a commit if you need one.
+> **Maintenance.** halfmarble maintains this fork and intends to keep fixing and extending it,
+> because we ship it in production software — bugs here reach real users, so they get fixed
+> here first. Issues and pull requests are welcome. We make no release-cadence or
+> backwards-compatibility promise; pin a commit if you need one. Fork releases start at 2.0.0 —
+> the inherited 1.0.x tags are upstream's code and carry none of this.
 >
 > MIT, same as upstream. The upstream copyright notice and licence travel unchanged in
 > `LICENSE`; modified files carry a note saying what moved.
